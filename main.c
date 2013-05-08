@@ -13,6 +13,7 @@
 #define MAX_IN_CHANS 8
 #define RB_SIZE 8192*4
 #define MAX_PATH_LEN 256
+#define PRECOUNT 4096*64
 
 typedef struct {
     /* jack members */
@@ -53,6 +54,7 @@ typedef struct {
 
 int jack_process (jack_nframes_t nframes, void *arg);
 void jack_shutdown (void *arg);
+int jack_xrun_callback(void *arg);
 int init_jack(audio_userdata_t *audio_ud);
 void free_jack(audio_userdata_t *audio_ud);
 
@@ -73,11 +75,11 @@ int main(int argc, char *argv[])
         strncpy(audio_ud.out_prefix, argv[4], MAX_PATH_LEN);
         audio_ud.samp_target = atoi(argv[5]);
     } else if (argc == 1) {
-        audio_ud.num_in_chnls = 6;
-        audio_ud.num_out_chnls = 8;
+        audio_ud.num_in_chnls = 2;
+        audio_ud.num_out_chnls = 54;
         strncpy(audio_ud.impulse_path, "sweep.wav", MAX_PATH_LEN);
         strncpy(audio_ud.out_prefix, "run/", MAX_PATH_LEN);
-        audio_ud.samp_target = 5;
+        audio_ud.samp_target = 5; /* seconds */
     } else {
         printf("Usage:\n"
                "%s numinch numoutch impulsepath outprefix totalrectime\n",
@@ -86,7 +88,7 @@ int main(int argc, char *argv[])
     }
     printf("Opening %i inputs, %i outputs\n", audio_ud.num_in_chnls, audio_ud.num_out_chnls);
 
-    audio_ud.playback_gain = 0.1;
+    audio_ud.playback_gain = 0.3;
     audio_ud.precount = 0;
 
     /* Create ring buffer */
@@ -169,7 +171,7 @@ int init_jack(audio_userdata_t *audio_ud)
         return 1;
     }
     jack_set_process_callback (client, jack_process, audio_ud);
-
+    jack_set_xrun_callback (client, jack_xrun_callback, NULL);
     jack_on_shutdown (client, jack_shutdown, 0);
     fprintf (stdout, "Engine sample rate: %ui\n", jack_get_sample_rate (client));
 
@@ -219,19 +221,19 @@ int jack_process (jack_nframes_t nframes, void *arg)
     int chan, samp;
     audio_userdata_t *ud = (audio_userdata_t *) arg;
     float *buf;
-    if (ud->precount < 4096*4) {
+    if (ud->precount < PRECOUNT) {
         ud->precount += nframes;
         return 0;
     }
 
     /* playback */
-    if (ud->cur_play_index >= ud->num_out_chnls) {
-        ud->done = 1;
-        return 0;
-    }
     for (i = 0; i < ud->num_out_chnls; i++) {
         buf = jack_port_get_buffer(ud->output_ports[i], nframes);
         memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
+    }
+    if (ud->cur_play_index >= ud->num_out_chnls) {
+        ud->done = 1;
+        return 0;
     }
     buf = jack_port_get_buffer(ud->output_ports[ud->cur_play_index], nframes);
     for (i = 0; i < nframes; i++) {
@@ -273,6 +275,10 @@ void jack_shutdown (void *arg)
     fprintf(stderr, "Error. Jack shutdown!\n");
 }
 
+int jack_xrun_callback(void *arg)
+{
+    fprintf(stderr, "Error. Jack xrun.\n");
+}
 
 void *writer_thread(void *data)
 {
