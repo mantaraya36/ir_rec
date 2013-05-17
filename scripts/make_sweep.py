@@ -14,8 +14,8 @@ except:
 
 # from Aliki - GPL
 totalsamps = float(sr * dur)
-_k0 = float(48000 * fadein)
-_k2 = float(48000 * fadeout)
+_k0 = float(sr * fadein)
+_k2 = float(sr * fadeout)
 _k1 = totalsamps - _k0 - _k2
 b = log (fmax / fmin) / _k1;
 a = fmin / (b * sr);

@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <signal.h>
+
 
 //#include <lo/lo.h>
 //#include <portaudio.h>
@@ -61,6 +64,9 @@ void free_jack(audio_userdata_t *audio_ud);
 int read_impulse(const char *path, float **buffer, SF_INFO *sf_info_impulse);
 
 void *writer_thread(void *data);
+
+int running;
+static void finish(int ignore){ running = 0; fprintf(stderr, "Interrupted.\n");}
 
 int main(int argc, char *argv[])
 {
@@ -129,12 +135,14 @@ int main(int argc, char *argv[])
 
     iret1 = pthread_create( &thread, NULL, &writer_thread, (void*) &audio_ud);
 
-    printf("Press ENTER to exit.\n");
-    c = getchar();
+    running = 1;
+    (void) signal(SIGINT, finish);
+    while (audio_ud.running && running) {
+        usleep(200000);
+    }
     audio_ud.running = 0;
     pthread_join(thread, NULL);
 
-//    free(rb_buffer_out);
     free_jack(&audio_ud);
     return 0;
 }
@@ -150,7 +158,7 @@ int read_impulse(const char *path, float **buffer, SF_INFO *sf_info_impulse)
         return 1;
     }
     if (sf_info_impulse->channels != 1) {
-        printf("Error, soundfile '%s'' contains more than 1 channel.\n", path);
+        printf("Error, soundfile '%s' contains more than 1 channel.\n", path);
         return 1;
     }
     *buffer = (float *) calloc(sf_info_impulse->frames, sizeof(float));
@@ -173,7 +181,7 @@ int init_jack(audio_userdata_t *audio_ud)
     jack_set_process_callback (client, jack_process, audio_ud);
     jack_set_xrun_callback (client, jack_xrun_callback, NULL);
     jack_on_shutdown (client, jack_shutdown, 0);
-    fprintf (stdout, "Engine sample rate: %ui\n", jack_get_sample_rate (client));
+    fprintf (stdout, "Engine sample rate: %u\n", jack_get_sample_rate (client));
 
     audio_ud->input_ports = (jack_port_t **) calloc(audio_ud->num_in_chnls, sizeof(jack_port_t *));
     for (i = 0; i < audio_ud->num_in_chnls; i++) {
@@ -223,15 +231,20 @@ int jack_process (jack_nframes_t nframes, void *arg)
     float *buf;
     if (ud->precount < PRECOUNT) {
         ud->precount += nframes;
+        for (i = 0; i < ud->num_out_chnls; i++) {
+            buf = jack_port_get_buffer(ud->output_ports[i], nframes);
+            memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
+        }
         return 0;
     }
 
     /* playback */
-    for (i = 0; i < ud->num_out_chnls; i++) {
-        buf = jack_port_get_buffer(ud->output_ports[i], nframes);
-        memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
-    }
+
     if (ud->cur_play_index >= ud->num_out_chnls) {
+        for (i = 0; i < ud->num_out_chnls; i++) {
+            buf = jack_port_get_buffer(ud->output_ports[i], nframes);
+            memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
+        }
         ud->done = 1;
         return 0;
     }
