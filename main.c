@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <assert.h>
 
 
 //#include <lo/lo.h>
@@ -99,8 +100,8 @@ int main(int argc, char *argv[])
 
     /* Create ring buffer */
     audio_ud.write_rb = jack_ringbuffer_create(RB_SIZE * audio_ud.num_in_chnls * sizeof(float));
-    jack_ringbuffer_reset(audio_ud.write_rb);
     int res = jack_ringbuffer_mlock(audio_ud.write_rb);
+    jack_ringbuffer_reset(audio_ud.write_rb);
 
     /* initialize data */
     audio_ud.samp_count = 0;
@@ -229,34 +230,25 @@ int jack_process (jack_nframes_t nframes, void *arg)
     int chan, samp;
     audio_userdata_t *ud = (audio_userdata_t *) arg;
     float *buf;
+
+    for (i = 0; i < ud->num_out_chnls; i++) {
+        buf = jack_port_get_buffer(ud->output_ports[i], nframes);
+        memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
+    }
     if (ud->precount < PRECOUNT) {
         ud->precount += nframes;
-        for (i = 0; i < ud->num_out_chnls; i++) {
-            buf = jack_port_get_buffer(ud->output_ports[i], nframes);
-            memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
-        }
         return 0;
     }
 
     /* playback */
 
     if (ud->cur_play_index >= ud->num_out_chnls) {
-        for (i = 0; i < ud->num_out_chnls; i++) {
-            buf = jack_port_get_buffer(ud->output_ports[i], nframes);
-            memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t) );
-        }
         ud->done = 1;
         return 0;
     }
     buf = jack_port_get_buffer(ud->output_ports[ud->cur_play_index], nframes);
     for (i = 0; i < nframes; i++) {
-        if (ud->samp_count < ud->sf_info_impulse.frames) {
-            buf[i] = ud->impulse_samples[ud->samp_count] * ud->playback_gain;
-        } else {
-            buf[i] = 0.0;
-        }
-        ud->samp_count++;
-        if (ud->samp_count > ud->samp_target) { /* start new measurement */
+        if (ud->samp_count == ud->samp_target) { /* start new measurement */
             fprintf(stdout, "Finished chan %i\n", ud->cur_play_index);
             ud->samp_count = 0;
             ud->cur_play_index++;
@@ -264,17 +256,25 @@ int jack_process (jack_nframes_t nframes, void *arg)
                 buf = jack_port_get_buffer(ud->output_ports[ud->cur_play_index], nframes);
             }
         }
+        if (ud->samp_count < ud->sf_info_impulse.frames) {
+            buf[i] = ud->impulse_samples[ud->samp_count] * ud->playback_gain;
+        } else {
+            buf[i] = 0.0;
+        }
+        ud->samp_count++;
     }
 
-    /* interleave channels */
     for (i = 0; i < ud->num_in_chnls; i++) {
         ud->in_bufs[i] = jack_port_get_buffer(ud->input_ports[i], nframes);
     }
+    /* interleave channels */
     for (samp = 0; samp < nframes; samp++) {
+        float frame[MAX_IN_CHANS];
         for (chan = 0; chan < ud->num_in_chnls; chan++) {
-            jack_ringbuffer_write(ud->write_rb, (const char *) (ud->in_bufs[chan] + samp),
-                                  sizeof(float));
+            frame[chan] = ud->in_bufs[chan][samp];
         }
+        jack_ringbuffer_write(ud->write_rb, (const char *) frame,
+                              sizeof(float) * ud->num_in_chnls);
     }
     if (pthread_mutex_trylock (&ud->disk_thread_lock) == 0) {
         pthread_cond_signal (&ud->data_ready);
@@ -303,14 +303,18 @@ void *writer_thread(void *data)
         while (jack_ringbuffer_read_space(ud->write_rb) >= sizeof(float) * ud->num_in_chnls) {
             int samps_read = jack_ringbuffer_read(ud->write_rb, (char *) audio,
                                               sizeof(float) * ud->num_in_chnls)/ sizeof(float);
+            assert(samps_read == ud->num_in_chnls);
             if (samps_read > 0) {
                 ud->rec_counter += samps_read;
-                if (ud->rec_counter/ud->num_in_chnls > ud->samp_target) {
+                if (ud->rec_counter/ud->num_in_chnls == ud->samp_target) {
                     sf_close(ud->sf);
                     ud->cur_file_index++;
                     char filename[MAX_PATH_LEN];
                     sprintf(filename, "%sout_%02i.wav", ud->out_prefix, ud->cur_file_index);
                     ud->sf = sf_open(filename, SFM_WRITE, &ud->rec_sfinfo);
+                    if (!ud->sf) {
+                        fprintf(stderr, "Error writing file '%s'\n", filename);
+                    }
                     ud->rec_counter = 0;
                 }
                 sf_write_float(ud->sf, audio, samps_read);
